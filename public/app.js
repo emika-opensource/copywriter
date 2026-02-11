@@ -5,14 +5,20 @@ const $$ = (s, p = document) => [...p.querySelectorAll(s)];
 let currentPage = 'dashboard';
 let state = { stats: {}, articles: [], kbDocs: [], screenshots: [], videos: [], suggestions: [], settings: {}, templates: {} };
 
-// ============ API ============
+// ============ API (with error handling) ============
 async function api(url, opts = {}) {
   const res = await fetch('/api' + url, {
     headers: opts.body && !(opts.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {},
     ...opts,
     body: opts.body instanceof FormData ? opts.body : opts.body ? JSON.stringify(opts.body) : undefined
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) {
+    const msg = data.error || `Request failed (${res.status})`;
+    toast(msg, 'error');
+    throw new Error(msg);
+  }
+  return data;
 }
 
 // ============ Toast ============
@@ -21,7 +27,7 @@ function toast(msg, type = 'info') {
   el.className = `toast toast-${type}`;
   el.textContent = msg;
   $('#toast-container').appendChild(el);
-  setTimeout(() => el.remove(), 3500);
+  setTimeout(() => { if (el.parentNode) el.remove(); }, 3500);
 }
 
 // ============ Modal ============
@@ -29,12 +35,48 @@ function showModal(title, contentHtml, footerHtml = '', wide = false) {
   const overlay = $('#modal-overlay');
   overlay.classList.remove('hidden');
   overlay.innerHTML = `<div class="modal ${wide ? 'modal-wide' : ''}">
-    <div class="modal-header"><h2>${title}</h2><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-header"><h2>${escHtml(title)}</h2><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">${contentHtml}</div>
     ${footerHtml ? `<div class="modal-footer">${footerHtml}</div>` : ''}
   </div>`;
 }
 function closeModal() { $('#modal-overlay').classList.add('hidden'); $('#modal-overlay').innerHTML = ''; }
+
+// ============ Loading state ============
+function showLoading(el) {
+  el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;padding:60px"><div class="spinner"></div></div>';
+}
+
+// ============ URL Routing ============
+const PAGE_PARENT_MAP = {
+  'article-editor': 'articles',
+  'screenshot-editor': 'screenshots',
+  'video-editor': 'videos'
+};
+
+function updateHash(page, id) {
+  const hash = id ? `#${page}/${id}` : `#${page}`;
+  if (location.hash !== hash) history.pushState(null, '', hash);
+}
+
+function parseHash() {
+  const h = location.hash.slice(1);
+  if (!h) return { page: 'dashboard', id: null };
+  const [page, id] = h.split('/');
+  return { page, id: id || null };
+}
+
+window.addEventListener('popstate', () => {
+  const { page, id } = parseHash();
+  if (id) {
+    if (page === 'article-editor') { editArticle(id, true); return; }
+    if (page === 'screenshot-editor') { viewScreenshot(id, true); return; }
+    if (page === 'video-editor') { editVideo(id, true); return; }
+  }
+  currentPage = page || 'dashboard';
+  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === currentPage));
+  render();
+});
 
 // ============ Navigation ============
 $$('.nav-item').forEach(item => {
@@ -46,7 +88,10 @@ $$('.nav-item').forEach(item => {
 
 function navigate(page) {
   currentPage = page;
-  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  updateHash(page);
+  // Highlight sidebar — map sub-pages to parent
+  const parentPage = PAGE_PARENT_MAP[page] || page;
+  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === parentPage));
   render();
 }
 
@@ -89,22 +134,114 @@ function simpleMarkdown(text) {
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/^> (.+)$/gm, '<blockquote style="border-left:3px solid var(--border-light);padding-left:12px;color:var(--text-dim);margin:8px 0">$1</blockquote>')
+    .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--border);margin:16px 0">')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;margin:8px 0">')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--accent)">$1</a>')
+    .replace(/^\|(.+)\|$/gm, (match, inner) => {
+      const cells = inner.split('|').map(c => c.trim());
+      if (cells.every(c => /^[-:]+$/.test(c))) return '';
+      return '<tr>' + cells.map(c => `<td style="padding:4px 8px;border:1px solid var(--border)">${c}</td>`).join('') + '</tr>';
+    })
+    .replace(/((<tr>.*<\/tr>\s*)+)/g, '<table style="border-collapse:collapse;margin:8px 0;font-size:13px">$1</table>')
     .replace(/^- (.+)$/gm, '<li>$1</li>')
     .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
     .replace(/\n{2,}/g, '</p><p>')
     .replace(/\n/g, '<br>');
 }
 
+// ============ Suggestion action handler ============
+function handleSuggestionAction(s) {
+  const suggestion = typeof s === 'string' ? JSON.parse(s) : s;
+  switch (suggestion.action) {
+    case 'Create Article':
+      if (suggestion.topic) {
+        createArticleWithTopic(suggestion.topic);
+      } else {
+        createArticle();
+      }
+      break;
+    case 'Upload Document':
+      kbTab = 'upload';
+      navigate('knowledge');
+      break;
+    case 'Use Template':
+      navigate('articles');
+      setTimeout(() => showTemplateChooser(), 100);
+      break;
+    case 'Create Video':
+      if (suggestion.articleId) createVideo();
+      else createVideo();
+      break;
+    case 'Add Screenshot':
+      navigate('screenshots');
+      setTimeout(() => showCaptureForm(), 100);
+      break;
+    default:
+      navigate('articles');
+  }
+}
+
+async function createArticleWithTopic(topic) {
+  const title = topic.charAt(0).toUpperCase() + topic.slice(1);
+  const article = await api('/articles', { method: 'POST', body: { title, sections: [{ title: 'Overview', content: '' }], status: 'draft' } });
+  toast('Article created', 'success');
+  editArticle(article.id);
+}
+
 // ============ DASHBOARD ============
 async function renderDashboard(el) {
+  showLoading(el);
   const [stats, suggestions] = await Promise.all([api('/stats'), api('/suggestions')]);
   state.stats = stats;
+
+  const isEmptyState = !stats.totalArticles && !stats.totalKBDocs && !stats.totalScreenshots && !stats.totalVideos;
+
+  if (isEmptyState) {
+    el.innerHTML = `
+      <h1>Welcome to Copywriter</h1>
+      <p class="page-subtitle">Let's create your first piece of content. Follow these steps to get started.</p>
+
+      <div class="onboarding-steps">
+        <div class="onboarding-step" onclick="kbTab='upload';navigate('knowledge')" style="cursor:pointer">
+          <div class="onboarding-step-num">1</div>
+          <div class="onboarding-step-content">
+            <div class="onboarding-step-title">Upload a document</div>
+            <div class="onboarding-step-desc">Add your product docs, FAQs, or any reference material to power content suggestions and RAG search.</div>
+          </div>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="onboarding-step" onclick="createArticle()" style="cursor:pointer">
+          <div class="onboarding-step-num">2</div>
+          <div class="onboarding-step-content">
+            <div class="onboarding-step-title">Create your first article</div>
+            <div class="onboarding-step-desc">Use a template or start from scratch. Write help center articles, guides, or FAQs.</div>
+          </div>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+        <div class="onboarding-step" onclick="navigate('screenshots')" style="cursor:pointer">
+          <div class="onboarding-step-num">3</div>
+          <div class="onboarding-step-content">
+            <div class="onboarding-step-title">Capture & annotate screenshots</div>
+            <div class="onboarding-step-desc">Add visual context to your articles with annotated screenshots from your product.</div>
+          </div>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+      </div>
+
+      <div class="card mt-24" style="max-width:500px">
+        <h3 style="margin-bottom:12px">Quick Paste</h3>
+        <p style="font-size:13px;color:var(--text-dim);margin-bottom:12px">Don't have a file? Paste some content to get started instantly.</p>
+        <textarea id="quick-paste-content" rows="4" placeholder="Paste product documentation, FAQ, or any content here..."></textarea>
+        <button class="btn btn-primary mt-12" onclick="quickPasteUpload()">Add to Knowledge Base</button>
+      </div>
+    `;
+    return;
+  }
 
   el.innerHTML = `
     <h1>Dashboard</h1>
@@ -138,7 +275,7 @@ async function renderDashboard(el) {
     </div>
     <div class="suggestion-grid mb-24">
       ${suggestions.slice(0, 3).map(s => `
-        <div class="suggestion-card">
+        <div class="suggestion-card suggestion-card-clickable" onclick='handleSuggestionAction(${JSON.stringify(s).replace(/'/g, "&#39;")})'>
           <div class="suggestion-icon" style="background:var(--${s.priority === 'high' ? 'accent' : s.priority === 'medium' ? 'amber' : 'green'}-dim)">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--${s.priority === 'high' ? 'accent' : s.priority === 'medium' ? 'amber' : 'green'})" stroke-width="2"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
           </div>
@@ -178,10 +315,21 @@ async function renderDashboard(el) {
   `;
 }
 
+async function quickPasteUpload() {
+  const content = $('#quick-paste-content')?.value;
+  if (!content || !content.trim()) return toast('Paste some content first', 'error');
+  try {
+    const doc = await api('/knowledge-base', { method: 'POST', body: { title: 'Quick Paste', content, category: 'general' } });
+    toast(`Added! ${doc.chunkCount} chunks created.`, 'success');
+    renderDashboard($('#page-content'));
+  } catch(e) { /* error already toasted by api() */ }
+}
+
 // ============ KNOWLEDGE BASE ============
 let kbTab = 'documents';
 
 async function renderKnowledge(el) {
+  showLoading(el);
   const docs = await api('/knowledge-base');
   state.kbDocs = docs;
 
@@ -238,7 +386,7 @@ function filterKBDocs(q) {
 
 async function viewKBDoc(id) {
   const doc = await api(`/knowledge-base/${id}`);
-  showModal(escHtml(doc.name), `
+  showModal(doc.name, `
     <div class="flex-between mb-16">
       <div>
         <span class="badge badge-accent" style="margin-right:8px">${(doc.type || 'text').toUpperCase()}</span>
@@ -321,7 +469,7 @@ async function uploadKBFile(file) {
     bar.style.width = '100%'; status.textContent = `Uploaded! ${doc.chunkCount} chunks created.`;
     toast('Document uploaded: ' + doc.name, 'success');
     setTimeout(() => { kbTab = 'documents'; renderKnowledge($('#page-content')); }, 1500);
-  } catch (e) { status.textContent = 'Upload failed'; toast('Upload failed', 'error'); }
+  } catch (e) { status.textContent = 'Upload failed'; }
 }
 
 function renderKBPaste(el) {
@@ -341,15 +489,18 @@ async function submitKBPaste() {
   const title = $('#kb-paste-title').value;
   const content = $('#kb-paste-content').value;
   if (!content.trim()) return toast('Content is required', 'error');
-  const doc = await api('/knowledge-base', { method: 'POST', body: { title: title || 'Pasted Content', content, category: $('#kb-paste-category').value } });
-  toast(`Added! ${doc.chunkCount} chunks created.`, 'success');
-  kbTab = 'documents'; renderKnowledge($('#page-content'));
+  try {
+    const doc = await api('/knowledge-base', { method: 'POST', body: { title: title || 'Pasted Content', content, category: $('#kb-paste-category').value } });
+    toast(`Added! ${doc.chunkCount} chunks created.`, 'success');
+    kbTab = 'documents'; renderKnowledge($('#page-content'));
+  } catch(e) { /* already toasted */ }
 }
 
 // ============ ARTICLES ============
 let articleFilter = 'all';
 
 async function renderArticles(el) {
+  showLoading(el);
   const [articles, templates] = await Promise.all([api('/articles'), api('/articles/templates')]);
   state.articles = articles;
   state.templates = templates;
@@ -421,18 +572,65 @@ async function createArticle() {
   editArticle(article.id);
 }
 
-async function editArticle(id) {
+// ============ Autosave ============
+let _autosaveTimer = null;
+let _autosaveArticleId = null;
+let _articleDirty = false;
+
+function startAutosave(id) {
+  stopAutosave();
+  _autosaveArticleId = id;
+  _articleDirty = false;
+  _autosaveTimer = setInterval(() => {
+    if (_articleDirty && _autosaveArticleId === id) {
+      _articleDirty = false;
+      autoSaveArticle(id);
+    }
+  }, 30000);
+}
+
+function stopAutosave() {
+  if (_autosaveTimer) { clearInterval(_autosaveTimer); _autosaveTimer = null; }
+  _autosaveArticleId = null;
+  _articleDirty = false;
+}
+
+function markDirty() { _articleDirty = true; }
+
+async function autoSaveArticle(id) {
+  try {
+    const data = collectArticleData();
+    await api(`/articles/${id}`, { method: 'PUT', body: data });
+    // subtle indicator
+    const indicator = $('#autosave-indicator');
+    if (indicator) {
+      indicator.textContent = 'Auto-saved';
+      indicator.style.opacity = '1';
+      setTimeout(() => { indicator.style.opacity = '0'; }, 2000);
+    }
+  } catch(e) { /* silent fail for autosave */ }
+}
+
+async function editArticle(id, fromPopstate = false) {
   const article = await api(`/articles/${id}`);
   currentPage = 'article-editor';
+  if (!fromPopstate) updateHash('article-editor', id);
+  // Highlight parent nav
+  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === 'articles'));
 
   const el = $('#page-content');
   el.innerHTML = `
     <div class="flex-between mb-16">
-      <button class="btn btn-sm" onclick="navigate('articles')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
-        Back to Articles
-      </button>
+      <div class="flex gap-8" style="align-items:center">
+        <button class="btn btn-sm" onclick="stopAutosave();navigate('articles')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          Back to Articles
+        </button>
+        <span id="autosave-indicator" style="font-size:11px;color:var(--green);opacity:0;transition:opacity 0.3s"></span>
+      </div>
       <div class="flex gap-8">
+        <button class="btn btn-sm" onclick="copyArticleMarkdown()">Copy MD</button>
+        <button class="btn btn-sm" onclick="copyArticleHTML()">Copy HTML</button>
         <button class="btn btn-sm" onclick="previewArticle('${id}')">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
           Preview
@@ -445,7 +643,7 @@ async function editArticle(id) {
     <div style="display:grid;grid-template-columns:1fr 280px;gap:20px">
       <div>
         <div class="form-group">
-          <input type="text" id="article-title" value="${escHtml(article.title)}" placeholder="Article Title" style="font-size:20px;font-weight:700;padding:12px">
+          <input type="text" id="article-title" value="${escHtml(article.title)}" placeholder="Article Title" style="font-size:20px;font-weight:700;padding:12px" oninput="markDirty()">
         </div>
 
         <div id="sections-container">
@@ -461,42 +659,58 @@ async function editArticle(id) {
         <div class="card mb-12">
           <h3 style="margin-bottom:12px">Properties</h3>
           <div class="form-group"><label>Status</label>
-            <select id="article-status">
+            <select id="article-status" onchange="markDirty()">
               ${['draft', 'published', 'archived'].map(s => `<option value="${s}" ${article.status === s ? 'selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`).join('')}
             </select>
           </div>
           <div class="form-group"><label>Category</label>
-            <select id="article-category">
+            <select id="article-category" onchange="markDirty()">
               ${['general', 'getting-started', 'how-to', 'faq', 'troubleshooting', 'api', 'release-notes', 'guides', 'billing'].map(c => `<option value="${c}" ${article.category === c ? 'selected' : ''}>${c}</option>`).join('')}
             </select>
           </div>
           <div class="form-group"><label>Tags (comma-separated)</label>
-            <input type="text" id="article-tags" value="${(article.tags || []).join(', ')}" placeholder="tag1, tag2">
+            <input type="text" id="article-tags" value="${(article.tags || []).join(', ')}" placeholder="tag1, tag2" oninput="markDirty()">
           </div>
           <div class="form-group"><label>Author</label>
-            <input type="text" id="article-author" value="${escHtml(article.author || '')}" placeholder="Author name">
+            <input type="text" id="article-author" value="${escHtml(article.author || '')}" placeholder="Author name" oninput="markDirty()">
           </div>
         </div>
 
-        <div class="card">
+        <div class="card mb-12">
           <h3 style="margin-bottom:12px">SEO</h3>
-          <div class="form-group"><label>SEO Title</label><input type="text" id="seo-title" value="${escHtml(article.seo?.title || '')}" placeholder="Page title for search engines"></div>
-          <div class="form-group"><label>SEO Description</label><textarea id="seo-description" rows="3" placeholder="Meta description">${escHtml(article.seo?.description || '')}</textarea></div>
-          <div class="form-group"><label>SEO Keywords</label><input type="text" id="seo-keywords" value="${escHtml(article.seo?.keywords || '')}" placeholder="keyword1, keyword2"></div>
+          <div class="form-group"><label>SEO Title</label><input type="text" id="seo-title" value="${escHtml(article.seo?.title || '')}" placeholder="Page title for search engines" oninput="markDirty()"></div>
+          <div class="form-group"><label>SEO Description</label><textarea id="seo-description" rows="3" placeholder="Meta description" oninput="markDirty()">${escHtml(article.seo?.description || '')}</textarea></div>
+          <div class="form-group"><label>SEO Keywords</label><input type="text" id="seo-keywords" value="${escHtml(article.seo?.keywords || '')}" placeholder="keyword1, keyword2" oninput="markDirty()"></div>
+        </div>
+
+        <div class="card" style="font-size:12px;color:var(--text-muted)">
+          <div id="article-word-count"></div>
         </div>
       </div>
     </div>
   `;
+
+  startAutosave(id);
+  updateWordCount();
+}
+
+function updateWordCount() {
+  const sections = $$('.section-content');
+  let words = 0;
+  sections.forEach(el => { words += (el.value || '').split(/\s+/).filter(Boolean).length; });
+  const readTime = Math.max(1, Math.round(words / 200));
+  const wc = $('#article-word-count');
+  if (wc) wc.textContent = `${words} words · ~${readTime} min read`;
 }
 
 function sectionEditorHtml(index, section) {
   return `
     <div class="section-editor" data-index="${index}">
       <div class="section-editor-header">
-        <input type="text" class="section-title" value="${escHtml(section.title)}" placeholder="Section Title">
+        <input type="text" class="section-title" value="${escHtml(section.title)}" placeholder="Section Title" oninput="markDirty()">
         <button class="btn btn-sm btn-danger" onclick="removeSection(${index})" title="Remove section">&times;</button>
       </div>
-      <textarea class="section-content" rows="8" placeholder="Write content in Markdown...">${escHtml(section.content)}</textarea>
+      <textarea class="section-content" rows="8" placeholder="Write content in Markdown..." oninput="markDirty();updateWordCount()">${escHtml(section.content)}</textarea>
     </div>
   `;
 }
@@ -511,6 +725,7 @@ function removeSection(index) {
   const editors = $$('.section-editor');
   if (editors.length <= 1) return toast('Article must have at least one section', 'error');
   editors[index]?.remove();
+  markDirty();
 }
 
 function collectArticleData() {
@@ -535,13 +750,25 @@ function collectArticleData() {
 
 async function saveArticle(id) {
   const data = collectArticleData();
-  if (!data.title) return toast('Title is required', 'error');
+  if (!data.title.trim()) return toast('Title is required', 'error');
+  // Confirm publish
+  if (data.status === 'published') {
+    const prev = state.articles.find(a => a.id === id);
+    if (prev && prev.status !== 'published') {
+      if (!confirm('Publish this article? It will be visible publicly.')) {
+        $('#article-status').value = prev.status;
+        return;
+      }
+    }
+  }
   await api(`/articles/${id}`, { method: 'PUT', body: data });
+  _articleDirty = false;
   toast('Article saved', 'success');
 }
 
 async function deleteArticle(id) {
   if (!confirm('Delete this article?')) return;
+  stopAutosave();
   await api(`/articles/${id}`, { method: 'DELETE' });
   toast('Article deleted', 'success');
   navigate('articles');
@@ -564,8 +791,52 @@ async function previewArticle(id) {
   showModal('Article Preview', html, '', true);
 }
 
+function copyArticleMarkdown() {
+  const data = collectArticleData();
+  let md = `# ${data.title}\n\n`;
+  data.sections.forEach(s => {
+    if (s.title) md += `## ${s.title}\n\n`;
+    md += s.content + '\n\n';
+  });
+  navigator.clipboard.writeText(md).then(() => toast('Markdown copied', 'success'));
+}
+
+function copyArticleHTML() {
+  const data = collectArticleData();
+  let html = `<h1>${escHtml(data.title)}</h1>\n`;
+  data.sections.forEach(s => {
+    if (s.title) html += `<h2>${escHtml(s.title)}</h2>\n`;
+    html += simpleMarkdown(s.content) + '\n';
+  });
+  navigator.clipboard.writeText(html).then(() => toast('HTML copied', 'success'));
+}
+
+// ============ Keyboard shortcuts ============
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    e.preventDefault();
+    if (currentPage === 'article-editor' && _autosaveArticleId) {
+      saveArticle(_autosaveArticleId);
+    } else if (currentPage === 'video-editor' && state.currentVideo) {
+      saveVideo(state.currentVideo.id);
+    }
+  }
+  if (e.key === 'Escape') {
+    if (!$('#modal-overlay').classList.contains('hidden')) closeModal();
+  }
+});
+
+// Unsaved changes warning
+window.addEventListener('beforeunload', (e) => {
+  if (_articleDirty) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
 // ============ SCREENSHOTS ============
 async function renderScreenshots(el) {
+  showLoading(el);
   const screenshots = await api('/screenshots');
   state.screenshots = screenshots;
 
@@ -628,7 +899,6 @@ async function captureScreenshot() {
     toast('Screenshot captured', 'success');
     viewScreenshot(ss.id);
   } catch (e) {
-    toast('Capture failed: ' + e.message, 'error');
     $('#capture-progress').style.display = 'none';
     $('#capture-btn').disabled = false;
   }
@@ -637,9 +907,11 @@ async function captureScreenshot() {
 // ============ Screenshot Annotation Editor ============
 let annotationState = { tool: 'arrow', color: '#ef4444', lineWidth: 3, annotations: [], currentAnnotation: null, stepCounter: 1 };
 
-async function viewScreenshot(id) {
+async function viewScreenshot(id, fromPopstate = false) {
   const ss = await api(`/screenshots/${id}`);
   currentPage = 'screenshot-editor';
+  if (!fromPopstate) updateHash('screenshot-editor', id);
+  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === 'screenshots'));
   annotationState = { tool: 'arrow', color: '#ef4444', lineWidth: 3, annotations: ss.annotations || [], currentAnnotation: null, stepCounter: (ss.annotations || []).filter(a => a.type === 'step').length + 1 };
 
   const el = $('#page-content');
@@ -692,9 +964,9 @@ async function viewScreenshot(id) {
     <div class="annotation-container" id="anno-container">
       <canvas id="anno-canvas"></canvas>
     </div>
+    <div id="text-input-overlay" class="hidden" style="position:fixed;z-index:300"></div>
   `;
 
-  // Load image and setup canvas
   const img = new Image();
   img.crossOrigin = 'anonymous';
   img.onload = () => {
@@ -752,7 +1024,6 @@ function drawAnnotation(ctx, a, scale) {
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       ctx.stroke();
-      // Arrowhead
       const angle = Math.atan2(y2 - y1, x2 - x1);
       const headLen = 12;
       ctx.beginPath();
@@ -806,11 +1077,12 @@ function setupCanvasEvents(canvas) {
   canvas.addEventListener('mousedown', (e) => {
     const pos = getPos(e);
     if (annotationState.tool === 'text') {
-      const text = prompt('Enter text label:');
-      if (text) {
-        annotationState.annotations.push({ type: 'text', x1: pos.x, y1: pos.y, text, color: annotationState.color });
-        redrawCanvas();
-      }
+      showInlineTextInput(e.clientX, e.clientY, (text) => {
+        if (text) {
+          annotationState.annotations.push({ type: 'text', x1: pos.x, y1: pos.y, text, color: annotationState.color });
+          redrawCanvas();
+        }
+      });
       return;
     }
     if (annotationState.tool === 'step') {
@@ -841,6 +1113,21 @@ function setupCanvasEvents(canvas) {
   });
 }
 
+function showInlineTextInput(x, y, callback) {
+  const overlay = $('#text-input-overlay');
+  overlay.classList.remove('hidden');
+  overlay.style.left = x + 'px';
+  overlay.style.top = y + 'px';
+  overlay.innerHTML = `<input type="text" id="inline-text-input" placeholder="Enter label..." style="width:200px;font-size:14px;padding:6px 10px" autofocus>`;
+  const input = $('#inline-text-input');
+  input.focus();
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { callback(input.value); overlay.classList.add('hidden'); }
+    if (e.key === 'Escape') { callback(null); overlay.classList.add('hidden'); }
+  });
+  input.addEventListener('blur', () => { callback(input.value); overlay.classList.add('hidden'); });
+}
+
 function undoAnnotation() {
   annotationState.annotations.pop();
   redrawCanvas();
@@ -853,7 +1140,6 @@ function clearAnnotations() {
 
 async function saveAnnotations(id) {
   await api(`/screenshots/${id}`, { method: 'PUT', body: { annotations: annotationState.annotations } });
-  // Also export annotated image
   const canvas = $('#anno-canvas');
   if (canvas) {
     const imageData = canvas.toDataURL('image/png');
@@ -881,6 +1167,7 @@ async function deleteScreenshot(id) {
 
 // ============ VIDEOS ============
 async function renderVideos(el) {
+  showLoading(el);
   const videos = await api('/videos');
   state.videos = videos;
 
@@ -898,7 +1185,7 @@ async function renderVideos(el) {
         <div class="video-card" onclick="editVideo('${v.id}')">
           <div class="flex-between mb-12">
             <span style="font-weight:600">${escHtml(v.title)}</span>
-            <span class="badge badge-${v.status === 'rendered' ? 'published' : v.status === 'rendering' ? 'draft' : 'draft'}">${v.status}</span>
+            <span class="badge badge-${v.status === 'rendered' ? 'published' : 'draft'}">${v.status}</span>
           </div>
           <div style="font-size:12px;color:var(--text-muted)">${(v.slides || []).length} slides &middot; ${timeAgo(v.updatedAt || v.createdAt)}</div>
         </div>
@@ -913,9 +1200,11 @@ async function createVideo() {
   editVideo(video.id);
 }
 
-async function editVideo(id) {
+async function editVideo(id, fromPopstate = false) {
   const [video, screenshots] = await Promise.all([api(`/videos/${id}`), api('/screenshots')]);
   currentPage = 'video-editor';
+  if (!fromPopstate) updateHash('video-editor', id);
+  $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === 'videos'));
   state.currentVideo = video;
 
   const el = $('#page-content');
@@ -941,7 +1230,7 @@ async function editVideo(id) {
       <div>
         <h3 class="mb-12">Slides</h3>
         <div class="slide-list" id="slide-list">
-          ${(video.slides || []).map((s, i) => slideItemHtml(i, s, screenshots)).join('')}
+          ${(video.slides || []).map((s, i) => slideItemHtml(i, s)).join('')}
         </div>
         <button class="btn btn-sm mt-12" onclick="addSlide()">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -972,7 +1261,7 @@ async function editVideo(id) {
   `;
 }
 
-function slideItemHtml(index, slide, screenshots) {
+function slideItemHtml(index, slide) {
   return `
     <div class="slide-item" data-index="${index}">
       ${slide.imagePath ? `<img src="${slide.imagePath}" class="slide-thumb" onerror="this.style.background='var(--bg-hover)'">` : '<div class="slide-thumb" style="display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted)">No image</div>'}
@@ -994,13 +1283,13 @@ function slideItemHtml(index, slide, screenshots) {
 function addSlide() {
   const list = $('#slide-list');
   const index = $$('.slide-item').length;
-  list.insertAdjacentHTML('beforeend', slideItemHtml(index, { script: '', duration: 5 }, []));
+  list.insertAdjacentHTML('beforeend', slideItemHtml(index, { script: '', duration: 5 }));
 }
 
 function addSlideWithScreenshot(ssId, imagePath, url) {
   const list = $('#slide-list');
   const index = $$('.slide-item').length;
-  list.insertAdjacentHTML('beforeend', slideItemHtml(index, { screenshotId: ssId, imagePath, script: '', duration: 5 }, []));
+  list.insertAdjacentHTML('beforeend', slideItemHtml(index, { screenshotId: ssId, imagePath, script: '', duration: 5 }));
   toast('Slide added', 'info');
 }
 
@@ -1012,12 +1301,13 @@ function removeSlide(index) {
 function collectVideoData() {
   const slides = $$('.slide-item').map((el, i) => {
     const img = el.querySelector('.slide-thumb');
+    const imgSrc = img && img.tagName === 'IMG' ? img.getAttribute('src') : null;
     return {
       screenshotId: el.dataset?.screenshotId || null,
-      imagePath: img?.src || null,
+      imagePath: imgSrc,
       script: el.querySelector('.slide-script-input')?.value || '',
       duration: parseInt(el.querySelector('.slide-duration')?.value) || 5,
-      audioPath: el.querySelector('audio')?.src || null
+      audioPath: el.querySelector('audio')?.getAttribute('src') || null
     };
   });
   return { title: $('#video-title').value, slides };
@@ -1044,7 +1334,6 @@ async function generateSlideTTS(index) {
   toast('Generating voiceover...', 'info');
   try {
     const result = await api('/videos/tts', { method: 'POST', body: { text } });
-    // Add audio element
     const existing = items[index]?.querySelector('audio');
     if (existing) existing.src = result.path;
     else {
@@ -1053,7 +1342,7 @@ async function generateSlideTTS(index) {
     }
     toast('Voiceover generated', 'success');
   } catch (e) {
-    toast('TTS failed. Check ElevenLabs API key in Settings.', 'error');
+    /* already toasted by api() */
   }
 }
 
@@ -1065,23 +1354,24 @@ async function renderVideo(id) {
     toast(result.message || 'Video rendered', 'success');
     editVideo(id);
   } catch (e) {
-    toast('Render failed', 'error');
+    /* already toasted */
   }
 }
 
 // ============ SUGGESTIONS ============
 async function renderSuggestions(el) {
+  showLoading(el);
   const suggestions = await api('/suggestions');
   state.suggestions = suggestions;
 
   el.innerHTML = `
     <h1>Content Suggestions</h1>
-    <p class="page-subtitle">AI-powered recommendations based on your knowledge base and articles</p>
+    <p class="page-subtitle">Recommendations based on your knowledge base and articles</p>
 
     ${suggestions.length ? `
     <div class="suggestion-grid">
       ${suggestions.map(s => `
-        <div class="suggestion-card">
+        <div class="suggestion-card suggestion-card-clickable" onclick='handleSuggestionAction(${JSON.stringify(s).replace(/'/g, "&#39;")})'>
           <div class="suggestion-icon" style="background:var(--${s.type === 'setup' ? 'purple' : s.type === 'article-gap' ? 'accent' : s.type === 'article-type' ? 'amber' : s.type === 'video' ? 'purple' : 'green'}-dim)">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--${s.type === 'setup' ? 'purple' : s.type === 'article-gap' ? 'accent' : s.type === 'article-type' ? 'amber' : s.type === 'video' ? 'purple' : 'green'})" stroke-width="2">
               ${s.type === 'video' ? '<polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>' :
@@ -1109,6 +1399,7 @@ async function renderSuggestions(el) {
 
 // ============ SETTINGS ============
 async function renderSettings(el) {
+  showLoading(el);
   const settings = await api('/settings');
   state.settings = settings;
 
@@ -1130,12 +1421,6 @@ async function renderSettings(el) {
         <div class="form-group"><label>Site URL</label><input type="url" id="settings-site-url" value="${escHtml(settings.siteUrl || '')}" placeholder="https://docs.example.com"></div>
         <div class="form-group"><label>Default Author</label><input type="text" id="settings-author" value="${escHtml(settings.defaultAuthor || '')}" placeholder="Author name for articles"></div>
       </div>
-
-      <div class="card">
-        <h3 style="margin-bottom:16px">Video Rendering</h3>
-        <div class="form-group"><label>Remotion Concurrency</label><input type="number" id="settings-remotion-concurrency" value="${settings.remotionConcurrency || 1}" min="1" max="8"></div>
-        <p style="font-size:11px;color:var(--text-muted)">Number of parallel Remotion render threads. Higher values use more CPU/RAM.</p>
-      </div>
     </div>
 
     <button class="btn btn-primary mt-24" onclick="saveSettings()">Save Settings</button>
@@ -1148,12 +1433,24 @@ async function saveSettings() {
     elevenLabsVoiceId: $('#settings-elevenlabs-voice').value,
     siteName: $('#settings-site-name').value,
     siteUrl: $('#settings-site-url').value,
-    defaultAuthor: $('#settings-author').value,
-    remotionConcurrency: parseInt($('#settings-remotion-concurrency').value) || 1
+    defaultAuthor: $('#settings-author').value
   };
   await api('/settings', { method: 'POST', body: data });
   toast('Settings saved', 'success');
 }
 
 // ============ Init ============
-render();
+// Load from hash on startup
+(function init() {
+  const { page, id } = parseHash();
+  if (id) {
+    if (page === 'article-editor') { editArticle(id, true); return; }
+    if (page === 'screenshot-editor') { viewScreenshot(id, true); return; }
+    if (page === 'video-editor') { editVideo(id, true); return; }
+  }
+  if (page && page !== 'dashboard') {
+    currentPage = page;
+    $$('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  }
+  render();
+})();

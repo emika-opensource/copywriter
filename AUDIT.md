@@ -218,3 +218,55 @@ The Copywriter is a **well-designed tool with a polished UI** that suffers from 
 5. Remove Remotion deps (+2min)
 
 These five changes would dramatically improve the first-run experience with under 1 hour of work.
+
+---
+
+## Fixes Applied
+
+**Date:** 2026-02-11
+
+### Critical (Time-to-First-Value)
+
+1. **✅ Welcome/onboarding state on empty dashboard.** When all stats are zero, the dashboard now shows a 3-step guided onboarding flow ("Upload a document → Create your first article → Capture screenshots") with clickable cards that navigate directly to the relevant pages. Also includes a "Quick Paste" textarea for instant content ingestion.
+
+2. **✅ Suggestion cards are now clickable and actionable.** All suggestion cards (on dashboard and suggestions page) now have click handlers via `handleSuggestionAction()` that route to the correct page: "Create Article" navigates to article creation (pre-filled with topic), "Upload Document" opens KB upload tab, "Use Template" opens template chooser, "Add Screenshot" opens capture form, "Create Video" navigates to video creation.
+
+3. **✅ Fixed `api()` error handling.** The `api()` function now checks `res.ok` and throws on non-2xx responses, displaying error messages via toast. All callers that need graceful handling use try/catch (errors are already shown by `api()`).
+
+4. **✅ Trimmed BOOTSTRAP.md to 2 questions.** Reduced from 7 questions to 2: "What product?" and "Send me content." Defers all other questions to later. Immediately actionable.
+
+5. **✅ Removed Remotion dependencies.** Removed `@remotion/renderer` and `@remotion/cli` from package.json, saving ~200MB+ install time. Removed Remotion concurrency setting from Settings UI. Video render endpoint still exists as a stub but no longer implies Remotion is installed.
+
+### High Impact
+
+6. **✅ Added autosave to article editor.** Articles auto-save every 30 seconds when dirty. Visual "Auto-saved" indicator appears briefly. Dirty state tracked via `markDirty()` on all editor inputs.
+
+7. **✅ Added URL routing (hash-based).** SPA now uses hash routing (`#dashboard`, `#articles`, `#article-editor/id`, etc.). Browser back/forward works. Refreshing preserves current page. Deep links to specific articles, screenshots, and videos work.
+
+8. **✅ Added loading states.** All page transitions show a spinner while API calls resolve via `showLoading()`.
+
+9. **✅ Fixed sidebar active state for sub-pages.** `PAGE_PARENT_MAP` maps `article-editor→articles`, `screenshot-editor→screenshots`, `video-editor→videos`. Sidebar correctly highlights parent page when in sub-pages.
+
+10. **✅ Added unsaved changes detection.** `beforeunload` handler warns when article editor has unsaved changes.
+
+### Medium Impact
+
+11. **✅ Added article export.** "Copy MD" and "Copy HTML" buttons in article editor toolbar for exporting articles as Markdown or HTML to clipboard.
+
+12. **✅ Replaced `window.prompt()` for text annotations.** Screenshot text tool now uses an inline text input overlay instead of `window.prompt()`, maintaining dark theme immersion.
+
+13. **✅ Improved `simpleMarkdown()`.** Added support for blockquotes (`>`), horizontal rules (`---`), and basic table rendering.
+
+14. **✅ Added keyboard shortcuts.** Cmd/Ctrl+S saves article or video. Escape closes modals.
+
+15. **✅ Added word count and reading time.** Article editor sidebar shows live word count and estimated reading time.
+
+16. **✅ Fixed `showModal()` HTML injection.** Modal title now passes through `escHtml()` to prevent HTML injection from document names.
+
+17. **✅ Added publish confirmation.** Changing article status to "published" now shows a confirmation dialog.
+
+18. **✅ Fixed `collectVideoData` `img.src` bug.** Now uses `getAttribute('src')` for relative paths instead of the resolved absolute URL.
+
+19. **✅ Fixed `slideItemHtml` unused parameter.** Removed unused `screenshots` parameter.
+
+20. **✅ Added `GET /api/knowledge-base/:id` to SKILL.md API table.** Was documented in code but missing from the API reference table.

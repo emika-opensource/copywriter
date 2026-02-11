@@ -204,7 +204,7 @@ function initDefaults() {
       siteUrl: '',
       siteName: '',
       defaultAuthor: '',
-      remotionConcurrency: 1
+      defaultCategory: 'general'
     });
   }
   if (!loadJSON('articles.json', null)) saveJSON('articles.json', []);

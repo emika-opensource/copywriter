@@ -137,6 +137,7 @@ curl -X POST http://localhost:3000/api/knowledge-base \
 |--------|----------|-------------|
 | GET | `/api/stats` | Dashboard statistics |
 | GET/POST | `/api/knowledge-base` | List/add KB documents |
+| GET | `/api/knowledge-base/:id` | Get KB document with content |
 | DELETE | `/api/knowledge-base/:id` | Delete KB document |
 | POST | `/api/knowledge-base/search` | BM25 search `{query, limit}` |
 | GET/POST | `/api/articles` | List/create articles |
