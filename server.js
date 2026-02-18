@@ -23,6 +23,11 @@ fs.ensureDirSync(path.join(DATA_DIR, 'videos'));
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Content publishing — AI-generated reports, dashboards, analyses
+const CONTENT_DIR = path.join(__dirname, 'content');
+try { require('fs').mkdirSync(CONTENT_DIR, { recursive: true }); } catch(e) {}
+app.use('/content', express.static(CONTENT_DIR));
 app.use('/uploads', express.static(path.join(DATA_DIR, 'uploads')));
 app.use('/screenshots', express.static(path.join(DATA_DIR, 'screenshots')));
 app.use('/audio', express.static(path.join(DATA_DIR, 'audio')));
